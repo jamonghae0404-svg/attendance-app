@@ -1,18 +1,18 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
-import { Plus, UserX, UserCheck, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
+import { Plus, UserX, UserCheck, Trash2, ChevronDown, ChevronUp, LogOut, Loader2 } from 'lucide-react'
 import BottomNav from '@/components/BottomNav'
 import AppLogo from '@/components/AppLogo'
+import { useAuth } from '@/components/AuthProvider'
 import {
   getPrograms, saveProgram, deleteProgram,
   getParticipants, saveParticipant, terminateParticipant, reactivateParticipant
-} from '@/lib/storage'
+} from '@/lib/db'
 import type { Program, Participant } from '@/lib/types'
 
 export default function ManagementPage() {
-  const router = useRouter()
+  const { user, signOut } = useAuth()
   const [programs, setPrograms] = useState<Program[]>([])
   const [participants, setParticipants] = useState<Participant[]>([])
   const [newProgramName, setNewProgramName] = useState('')
@@ -20,52 +20,52 @@ export default function ManagementPage() {
   const [selectedProgramId, setSelectedProgramId] = useState<string>('')
   const [expandedProgram, setExpandedProgram] = useState<string | null>(null)
   const [showInactive, setShowInactive] = useState(false)
+  const [loading, setLoading] = useState(true)
 
-  useEffect(() => {
-    const session = sessionStorage.getItem('auth_session')
-    if (!session) router.replace('/')
-  }, [router])
-
-  function loadAll() {
-    const progs = getPrograms()
-    setPrograms(progs)
-    setParticipants(getParticipants())
-    if (progs.length > 0 && !selectedProgramId) {
-      setSelectedProgramId(progs[0].id)
-      setExpandedProgram(progs[0].id)
+  async function loadAll() {
+    setLoading(true)
+    try {
+      const [progs, parts] = await Promise.all([getPrograms(), getParticipants()])
+      setPrograms(progs)
+      setParticipants(parts)
+      if (progs.length > 0 && !selectedProgramId) {
+        setSelectedProgramId(progs[0].id)
+        setExpandedProgram(progs[0].id)
+      }
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoading(false)
     }
   }
 
-  useEffect(() => {
-    loadAll()
-  }, [])
+  useEffect(() => { loadAll() }, [])
 
-  function handleAddProgram(e: React.FormEvent) {
+  async function handleAddProgram(e: React.FormEvent) {
     e.preventDefault()
     if (!newProgramName.trim()) return
-    saveProgram(newProgramName.trim())
+    await saveProgram(newProgramName.trim())
     setNewProgramName('')
     loadAll()
   }
 
-  function handleDeleteProgram(id: string) {
+  async function handleDeleteProgram(id: string) {
     if (!confirm('프로그램을 삭제하면 이용자 정보도 함께 삭제됩니다. 계속하시겠습니까?')) return
-    deleteProgram(id)
+    await deleteProgram(id)
     loadAll()
   }
 
-  function handleAddParticipant(e: React.FormEvent) {
+  async function handleAddParticipant(e: React.FormEvent) {
     e.preventDefault()
     if (!newParticipantName.trim() || !selectedProgramId) return
-    saveParticipant(newParticipantName.trim(), selectedProgramId)
+    await saveParticipant(newParticipantName.trim(), selectedProgramId)
     setNewParticipantName('')
     loadAll()
   }
 
-  function getParticipantsForProgram(programId: string, status?: 'active' | 'inactive') {
+  function getParticipantsFor(programId: string, status?: 'active' | 'inactive') {
     return participants.filter(p =>
-      p.programId === programId &&
-      (status ? p.status === status : true)
+      p.programId === programId && (status ? p.status === status : true)
     )
   }
 
@@ -73,8 +73,21 @@ export default function ManagementPage() {
     <div className="min-h-screen bg-white pb-20">
       {/* 헤더 */}
       <div className="sticky top-0 bg-white border-b border-gray-100 z-10">
-        <div className="max-w-lg mx-auto px-4 py-3">
+        <div className="max-w-lg mx-auto px-4 py-3 flex items-center justify-between">
           <AppLogo />
+          <div className="flex flex-col items-end gap-1">
+            {user && (
+              <span className="text-xs text-gray-400 truncate max-w-[140px]">{user.email}</span>
+            )}
+            <button
+              onClick={signOut}
+              className="flex items-center gap-1 text-xs text-red-400 hover:text-red-600
+                bg-red-50 px-2.5 py-1.5 rounded-lg transition-colors"
+            >
+              <LogOut size={13} />
+              로그아웃
+            </button>
+          </div>
         </div>
       </div>
 
@@ -91,30 +104,32 @@ export default function ManagementPage() {
               className="flex-1 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50
                 text-sm text-gray-900 outline-none focus:border-indigo-400 focus:bg-white"
             />
-            <button
-              type="submit"
+            <button type="submit"
               className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-medium
-                active:bg-indigo-700 flex items-center gap-1.5"
-            >
-              <Plus size={16} />
-              추가
+                active:bg-indigo-700 flex items-center gap-1.5">
+              <Plus size={16} />추가
             </button>
           </form>
         </div>
 
-        {/* 프로그램 목록 */}
-        {programs.length === 0 ? (
+        {/* 로딩 */}
+        {loading ? (
+          <div className="flex justify-center py-10">
+            <Loader2 size={28} className="animate-spin text-indigo-400" />
+          </div>
+        ) : programs.length === 0 ? (
           <div className="text-center py-10 text-gray-400">
             <p>등록된 프로그램이 없습니다</p>
           </div>
         ) : (
           programs.map(program => {
-            const active = getParticipantsForProgram(program.id, 'active')
-            const inactive = getParticipantsForProgram(program.id, 'inactive')
+            const active = getParticipantsFor(program.id, 'active')
+            const inactive = getParticipantsFor(program.id, 'inactive')
             const isExpanded = expandedProgram === program.id
 
             return (
-              <div key={program.id} className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
+              <div key={program.id}
+                className="bg-white rounded-xl border border-gray-100 shadow-sm overflow-hidden">
                 {/* 프로그램 헤더 */}
                 <div
                   className="flex items-center justify-between p-4 cursor-pointer"
@@ -137,14 +152,15 @@ export default function ManagementPage() {
                     >
                       <Trash2 size={16} />
                     </button>
-                    {isExpanded ? <ChevronUp size={18} className="text-gray-400" /> : <ChevronDown size={18} className="text-gray-400" />}
+                    {isExpanded
+                      ? <ChevronUp size={18} className="text-gray-400" />
+                      : <ChevronDown size={18} className="text-gray-400" />}
                   </div>
                 </div>
 
                 {/* 이용자 관리 */}
                 {isExpanded && (
                   <div className="border-t border-gray-100 p-4 space-y-4">
-                    {/* 이용자 추가 폼 */}
                     <form onSubmit={handleAddParticipant} className="flex gap-2">
                       <input
                         type="text"
@@ -154,13 +170,10 @@ export default function ManagementPage() {
                         className="flex-1 px-3 py-2.5 rounded-xl border border-gray-200 bg-gray-50
                           text-sm text-gray-900 outline-none focus:border-indigo-400 focus:bg-white"
                       />
-                      <button
-                        type="submit"
+                      <button type="submit"
                         className="px-4 py-2.5 bg-indigo-600 text-white rounded-xl text-sm font-medium
-                          active:bg-indigo-700 flex items-center gap-1.5"
-                      >
-                        <Plus size={16} />
-                        등록
+                          active:bg-indigo-700 flex items-center gap-1.5">
+                        <Plus size={16} />등록
                       </button>
                     </form>
 
@@ -174,12 +187,10 @@ export default function ManagementPage() {
                               className="flex items-center justify-between bg-gray-50 rounded-xl px-4 py-3">
                               <span className="text-sm font-medium text-gray-900">{p.name}</span>
                               <button
-                                onClick={() => { terminateParticipant(p.id); loadAll() }}
+                                onClick={async () => { await terminateParticipant(p.id); loadAll() }}
                                 className="flex items-center gap-1 text-xs text-red-500 bg-red-50
-                                  px-3 py-1.5 rounded-lg active:bg-red-100"
-                              >
-                                <UserX size={14} />
-                                종결
+                                  px-3 py-1.5 rounded-lg active:bg-red-100">
+                                <UserX size={14} />종결
                               </button>
                             </div>
                           ))}
@@ -192,8 +203,7 @@ export default function ManagementPage() {
                       <div>
                         <button
                           onClick={() => setShowInactive(s => !s)}
-                          className="text-xs font-medium text-gray-400 mb-2 flex items-center gap-1"
-                        >
+                          className="text-xs font-medium text-gray-400 mb-2 flex items-center gap-1">
                           종결 이용자 {inactive.length}명
                           {showInactive ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
                         </button>
@@ -211,12 +221,10 @@ export default function ManagementPage() {
                                   )}
                                 </div>
                                 <button
-                                  onClick={() => { reactivateParticipant(p.id); loadAll() }}
+                                  onClick={async () => { await reactivateParticipant(p.id); loadAll() }}
                                   className="flex items-center gap-1 text-xs text-indigo-500 bg-indigo-50
-                                    px-3 py-1.5 rounded-lg active:bg-indigo-100"
-                                >
-                                  <UserCheck size={14} />
-                                  복귀
+                                    px-3 py-1.5 rounded-lg active:bg-indigo-100">
+                                  <UserCheck size={14} />복귀
                                 </button>
                               </div>
                             ))}

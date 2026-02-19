@@ -1,20 +1,18 @@
 'use client'
 
 import { useEffect, useState, useCallback } from 'react'
-import { useRouter } from 'next/navigation'
-import { ChevronLeft, ChevronRight, NotebookPen, CheckCircle } from 'lucide-react'
+import { ChevronLeft, ChevronRight, NotebookPen, CheckCircle, Loader2 } from 'lucide-react'
 import BottomNav from '@/components/BottomNav'
 import ReasonAccordion from '@/components/ReasonAccordion'
 import AppLogo from '@/components/AppLogo'
 import {
   getPrograms, getParticipants, getRecordsByDate, saveRecord,
   deleteRecord, getJournal, saveJournal
-} from '@/lib/storage'
+} from '@/lib/db'
 import { formatDate, getKoreanDayName } from '@/lib/utils'
-import type { Program, Participant, AttendanceRecord } from '@/lib/types'
+import type { Program, Participant, AttendanceRecord, AttendanceStatus } from '@/lib/types'
 
 export default function AttendancePage() {
-  const router = useRouter()
   const [programs, setPrograms] = useState<Program[]>([])
   const [selectedProgram, setSelectedProgram] = useState<string>('')
   const [date, setDate] = useState(formatDate(new Date()))
@@ -24,65 +22,80 @@ export default function AttendancePage() {
   const [reasons, setReasons] = useState<Record<string, string>>({})
   const [journalText, setJournalText] = useState('')
   const [journalSaved, setJournalSaved] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState<string | null>(null) // participantId being saved
 
+  // 프로그램 초기 로드
   useEffect(() => {
-    const session = sessionStorage.getItem('auth_session')
-    if (!session) router.replace('/')
-  }, [router])
-
-  useEffect(() => {
-    const progs = getPrograms()
-    setPrograms(progs)
-    if (progs.length > 0 && !selectedProgram) {
-      setSelectedProgram(progs[0].id)
-    }
+    getPrograms().then(progs => {
+      setPrograms(progs)
+      if (progs.length > 0) setSelectedProgram(progs[0].id)
+      else setLoading(false)
+    }).catch(console.error)
   }, [])
 
-  const loadData = useCallback(() => {
+  const loadData = useCallback(async () => {
     if (!selectedProgram) return
-    const activeParticipants = getParticipants(selectedProgram).filter(p => p.status === 'active')
-    setParticipants(activeParticipants)
-    const recs = getRecordsByDate(selectedProgram, date)
-    setRecords(recs)
-    const initReasons: Record<string, string> = {}
-    recs.forEach(r => {
-      if (r.reason) initReasons[r.participantId] = r.reason
-    })
-    setReasons(initReasons)
-    const journal = getJournal(selectedProgram, date)
-    setJournalText(journal?.content || '')
-    setJournalSaved(false)
+    setLoading(true)
+    try {
+      const [allParticipants, recs, journal] = await Promise.all([
+        getParticipants(selectedProgram),
+        getRecordsByDate(selectedProgram, date),
+        getJournal(selectedProgram, date),
+      ])
+      setParticipants(allParticipants.filter(p => p.status === 'active'))
+      setRecords(recs)
+      const initReasons: Record<string, string> = {}
+      recs.forEach(r => { if (r.reason) initReasons[r.participantId] = r.reason })
+      setReasons(initReasons)
+      setJournalText(journal?.content || '')
+      setJournalSaved(false)
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoading(false)
+    }
   }, [selectedProgram, date])
 
   useEffect(() => {
     loadData()
   }, [loadData])
 
-  function getStatus(participantId: string): AttendanceRecord['status'] | null {
+  function getStatus(participantId: string): AttendanceStatus | null {
     return records.find(r => r.participantId === participantId)?.status ?? null
   }
 
-  function handleAttendance(participantId: string, status: AttendanceRecord['status']) {
-    const current = getStatus(participantId)
-    if (current === status) {
-      deleteRecord(participantId, date)
-    } else {
-      const reason = ['absent', 'early_leave'].includes(status)
-        ? reasons[participantId] || ''
-        : undefined
-      saveRecord(participantId, selectedProgram, date, status, reason)
-      if (status === 'present') setExpandedId(null)
-      else setExpandedId(participantId)
+  async function handleAttendance(participantId: string, status: AttendanceStatus) {
+    setSaving(participantId)
+    try {
+      const current = getStatus(participantId)
+      if (current === status) {
+        await deleteRecord(participantId, date)
+        setExpandedId(null)
+      } else {
+        const reason = ['absent', 'early_leave'].includes(status)
+          ? reasons[participantId] || undefined
+          : undefined
+        await saveRecord(participantId, selectedProgram, date, status, reason)
+        setExpandedId(status === 'present' ? null : participantId)
+      }
+      await loadData()
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setSaving(null)
     }
-    loadData()
   }
 
-  function handleReasonChange(participantId: string, reason: string) {
+  async function handleReasonChange(participantId: string, reason: string) {
     setReasons(prev => ({ ...prev, [participantId]: reason }))
     const rec = records.find(r => r.participantId === participantId)
     if (rec && rec.status !== 'present') {
-      saveRecord(participantId, selectedProgram, date, rec.status, reason)
-      loadData()
+      try {
+        await saveRecord(participantId, selectedProgram, date, rec.status, reason)
+      } catch (err) {
+        console.error(err)
+      }
     }
   }
 
@@ -92,11 +105,15 @@ export default function AttendancePage() {
     setDate(formatDate(d))
   }
 
-  function handleSaveJournal() {
+  async function handleSaveJournal() {
     if (!selectedProgram) return
-    saveJournal(selectedProgram, date, journalText)
-    setJournalSaved(true)
-    setTimeout(() => setJournalSaved(false), 2000)
+    try {
+      await saveJournal(selectedProgram, date, journalText)
+      setJournalSaved(true)
+      setTimeout(() => setJournalSaved(false), 2000)
+    } catch (err) {
+      console.error(err)
+    }
   }
 
   const dateObj = new Date(date)
@@ -110,50 +127,49 @@ export default function AttendancePage() {
         <div className="max-w-lg mx-auto px-4 py-3">
           <AppLogo />
           <div className="mt-2">
+            {/* 프로그램 선택 탭 */}
+            {programs.length > 1 && (
+              <div className="flex gap-2 mb-3 overflow-x-auto pb-1">
+                {programs.map(p => (
+                  <button
+                    key={p.id}
+                    onClick={() => setSelectedProgram(p.id)}
+                    className={`flex-shrink-0 px-3 py-1.5 rounded-full text-sm font-medium transition-all
+                      ${selectedProgram === p.id ? 'bg-indigo-600 text-white' : 'bg-gray-100 text-gray-600'}`}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            )}
 
-          {/* 프로그램 선택 */}
-          {programs.length > 1 && (
-            <div className="flex gap-2 mb-3 overflow-x-auto pb-1 scrollbar-none">
-              {programs.map(p => (
-                <button
-                  key={p.id}
-                  onClick={() => setSelectedProgram(p.id)}
-                  className={`flex-shrink-0 px-3 py-1.5 rounded-full text-sm font-medium transition-all
-                    ${selectedProgram === p.id
-                      ? 'bg-indigo-600 text-white'
-                      : 'bg-gray-100 text-gray-600'
-                    }`}
-                >
-                  {p.name}
-                </button>
-              ))}
+            {/* 날짜 선택 */}
+            <div className="flex items-center justify-between bg-gray-50 rounded-xl px-4 py-2">
+              <button onClick={() => shiftDate(-1)} className="text-gray-500 active:text-indigo-600 p-1">
+                <ChevronLeft size={20} />
+              </button>
+              <div className="text-center">
+                <span className="font-semibold text-gray-900">{date}</span>
+                <span className="ml-2 text-sm text-gray-500">({dayName})</span>
+                {isToday && (
+                  <span className="ml-2 text-xs bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-full">오늘</span>
+                )}
+              </div>
+              <button onClick={() => shiftDate(1)} className="text-gray-500 active:text-indigo-600 p-1">
+                <ChevronRight size={20} />
+              </button>
             </div>
-          )}
-
-          {/* 날짜 선택 */}
-          <div className="flex items-center justify-between bg-gray-50 rounded-xl px-4 py-2">
-            <button onClick={() => shiftDate(-1)} className="text-gray-500 active:text-indigo-600 p-1">
-              <ChevronLeft size={20} />
-            </button>
-            <div className="text-center">
-              <span className="font-semibold text-gray-900">{date}</span>
-              <span className="ml-2 text-sm text-gray-500">({dayName})</span>
-              {isToday && (
-                <span className="ml-2 text-xs bg-indigo-100 text-indigo-600 px-2 py-0.5 rounded-full">
-                  오늘
-                </span>
-              )}
-            </div>
-            <button onClick={() => shiftDate(1)} className="text-gray-500 active:text-indigo-600 p-1">
-              <ChevronRight size={20} />
-            </button>
-          </div>
           </div>
         </div>
       </div>
 
       <div className="max-w-lg mx-auto px-4 py-4 space-y-3">
-        {programs.length === 0 ? (
+        {/* 로딩 */}
+        {loading ? (
+          <div className="flex justify-center py-16">
+            <Loader2 size={32} className="animate-spin text-indigo-400" />
+          </div>
+        ) : programs.length === 0 ? (
           <div className="text-center py-16 text-gray-400">
             <p className="text-lg">등록된 프로그램이 없습니다</p>
             <p className="text-sm mt-1">관리 탭에서 프로그램을 생성해주세요</p>
@@ -166,8 +182,7 @@ export default function AttendancePage() {
         ) : (
           participants.map(participant => {
             const status = getStatus(participant.id)
-            const isExpanded = expandedId === participant.id &&
-              (status === 'absent' || status === 'early_leave')
+            const isSaving = saving === participant.id
 
             return (
               <div key={participant.id}
@@ -187,44 +202,38 @@ export default function AttendancePage() {
                   </div>
 
                   <div className="grid grid-cols-3 gap-2">
-                    {/* 출석 버튼 */}
                     <button
                       onClick={() => handleAttendance(participant.id, 'present')}
-                      className={`py-3 rounded-xl font-semibold text-sm transition-all active:scale-95
+                      disabled={isSaving}
+                      className={`py-3 rounded-xl font-semibold text-sm transition-all active:scale-95 disabled:opacity-60
                         ${status === 'present'
                           ? 'bg-green-500 text-white shadow-sm shadow-green-200'
-                          : 'bg-green-50 text-green-700 border border-green-200'
-                        }`}
+                          : 'bg-green-50 text-green-700 border border-green-200'}`}
                     >
-                      출석
+                      {isSaving ? <Loader2 size={16} className="animate-spin mx-auto" /> : '출석'}
                     </button>
-
-                    {/* 결석 버튼 */}
                     <button
                       onClick={() => handleAttendance(participant.id, 'absent')}
-                      className={`py-3 rounded-xl font-semibold text-sm transition-all active:scale-95
+                      disabled={isSaving}
+                      className={`py-3 rounded-xl font-semibold text-sm transition-all active:scale-95 disabled:opacity-60
                         ${status === 'absent'
                           ? 'bg-red-500 text-white shadow-sm shadow-red-200'
-                          : 'bg-red-50 text-red-700 border border-red-200'
-                        }`}
+                          : 'bg-red-50 text-red-700 border border-red-200'}`}
                     >
                       결석
                     </button>
-
-                    {/* 조퇴 버튼 */}
                     <button
                       onClick={() => handleAttendance(participant.id, 'early_leave')}
-                      className={`py-3 rounded-xl font-semibold text-sm transition-all active:scale-95
+                      disabled={isSaving}
+                      className={`py-3 rounded-xl font-semibold text-sm transition-all active:scale-95 disabled:opacity-60
                         ${status === 'early_leave'
                           ? 'bg-yellow-400 text-white shadow-sm shadow-yellow-200'
-                          : 'bg-yellow-50 text-yellow-700 border border-yellow-200'
-                        }`}
+                          : 'bg-yellow-50 text-yellow-700 border border-yellow-200'}`}
                     >
                       조퇴
                     </button>
                   </div>
 
-                  {/* 사유 아코디언 */}
                   <ReasonAccordion
                     open={status === 'absent' || status === 'early_leave'}
                     value={reasons[participant.id] || ''}
@@ -237,7 +246,7 @@ export default function AttendancePage() {
         )}
 
         {/* 오늘의 일지 */}
-        {selectedProgram && participants.length > 0 && (
+        {!loading && selectedProgram && participants.length > 0 && (
           <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 mt-2">
             <div className="flex items-center gap-2 mb-3">
               <NotebookPen size={18} className="text-indigo-500" />
@@ -258,15 +267,9 @@ export default function AttendancePage() {
                 flex items-center justify-center gap-2
                 ${journalSaved
                   ? 'bg-green-500 text-white'
-                  : 'bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white'
-                }`}
+                  : 'bg-indigo-600 hover:bg-indigo-700 active:bg-indigo-800 text-white'}`}
             >
-              {journalSaved ? (
-                <>
-                  <CheckCircle size={16} />
-                  저장됨
-                </>
-              ) : '일지 저장'}
+              {journalSaved ? <><CheckCircle size={16} />저장됨</> : '일지 저장'}
             </button>
           </div>
         )}
