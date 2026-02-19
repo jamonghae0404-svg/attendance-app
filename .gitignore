@@ -1,0 +1,20 @@
+# dependencies
+/node_modules
+
+# next.js
+/.next/
+/out/
+
+# env files (비밀번호 등 민감 정보 포함)
+.env.local
+.env*.local
+
+# PWA generated files
+/public/sw.js
+/public/workbox-*.js
+/public/sw.js.map
+/public/workbox-*.js.map
+
+# misc
+.DS_Store
+*.pem
